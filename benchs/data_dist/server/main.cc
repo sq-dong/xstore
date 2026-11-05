@@ -12,7 +12,7 @@ DEFINE_uint64(alloc_mem_m,
 DEFINE_uint64(nkeys, 1000000, "Number of keys to load");
 
 DEFINE_uint64(ncheck_model, 100, "Number of models to check");
-// DEFINE_string(data_file, "lognormal_uni_100m.txt", "data file name");
+DEFINE_uint64(server_life_s, 600, "Seconds to keep serving after index is ready");
 
 #include "./db.hh"
 
@@ -136,14 +136,9 @@ main(int argc, char** argv)
     }
   }
 
-  // wait for some seconds if there is worker
-  if (FLAGS_threads > 0) {
-    for (uint i = 0; i < 40; ++i) {
-      // while (1) {
-      // server does nothing because it is RDMA
-      // client will read the reg_mem using RDMA
-      sleep(1);
-    }
+  // Keep serving for client sweeps (same idea as ycsb --server_life_s).
+  for (uint i = 0; i < FLAGS_server_life_s; ++i) {
+    sleep(1);
   }
   r2::compile_fence();
   running = false;

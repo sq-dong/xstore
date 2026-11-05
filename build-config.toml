@@ -1,6 +1,7 @@
 [externals]
 ## The external libs are libs which donot built/cloned by the tool
-mkl = { path = "/opt/intel/mkl", exports = ["mkl_rt"],lib = "lib/intel64",include="include"}
+# Ubuntu apt MKL (upstream default: /opt/intel/mkl, lib/intel64)
+mkl = { path = "/usr", exports = ["mkl_rt"], lib = "lib/x86_64-linux-gnu", include = "include/mkl"}
 
 #[tests]
 #src   = ["deps/r2/src/logging.cc","tests/*.cc","src/stores/*.cc"]
@@ -16,7 +17,9 @@ kvs-workload = {url = "https://ipads.se.sjtu.edu.cn:1312/weixd/kvsworkloads.git"
 #rlib = {url="https://ipads.se.sjtu.edu.cn:1312/weixd/rib.git",build = false,exports=[],include=".."}
 rlib = {url = "https://github.com/wxdwfc/rlibv2.git", build=false, exports=[],include=".."}
 jemalloc={url="https://github.com/jemalloc/jemalloc.git",configure_cmd = "./configure --with-jemalloc-prefix=je",build_cmd = "make -j12",install_cmd = "",exports=["jemalloc"],include="include",build=true,lib="lib"}
-libtorch={include="include/torch/csrc/api/include/",include2="include",build=false,package="Torch",exports=[]}
+# Drop package="Torch" so ycsb/rw cmake does not require libtorch.
+# Re-enable package="Torch" when building bench_nn / USE_NN=1.
+libtorch={include="include/torch/csrc/api/include/",include2="include",build=false,exports=[]}
 
 [includes]
 ## cmake add subdirectory
@@ -69,22 +72,16 @@ extra = ["gflags","ibverbs","pthread","mkl_rt","boost_system", "boost_coroutine"
 # extra = ["gflags","ibverbs","pthread","mkl_rt","boost_system", "boost_coroutine", "pthread"]                          #
 #########################################################################################################################
 
+# data_dist with USE_NN=0 (no Torch). bench_nn left disabled.
 [[apps]]
 name = "data_server"
 src = ["./benchs/data_dist/server/main.cc", "./deps/r2/src/logging.cc","./deps/r2/src/sshed.cc", "./benchs/terminate.cc"]
-extra = ["ibverbs","pthread","mkl_rt","boost_system", "boost_coroutine", "pthread","jemalloc","${TORCH_LIBRARIES}","gflags"]
-
-## bench nn predict latency
-[[apps]]
-name = "bench_nn"
-src = ["./benchs/data_dist/bench_nn.cc", "./deps/r2/src/logging.cc","./deps/r2/src/sshed.cc", "./benchs/terminate.cc"]
-extra = ["ibverbs","pthread","mkl_rt","boost_system", "boost_coroutine", "pthread","jemalloc","${TORCH_LIBRARIES}","gflags"]
-
+extra = ["ibverbs","pthread","mkl_rt","boost_system", "boost_coroutine", "pthread","jemalloc","gflags"]
 
 [[apps]]
 name = "data_client"
 src = ["./benchs/data_dist/client.cc", "./deps/r2/src/logging.cc","./deps/r2/src/sshed.cc", "./benchs/terminate.cc"]
-extra = ["gflags","ibverbs","pthread","mkl_rt","boost_system", "boost_coroutine", "pthread","${TORCH_LIBRARIES}"]
+extra = ["gflags","ibverbs","pthread","mkl_rt","boost_system", "boost_coroutine", "pthread"]
 
 
 

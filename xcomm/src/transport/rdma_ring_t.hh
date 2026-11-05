@@ -53,7 +53,8 @@ struct RRingTransport : public STrait<RRingTransport<R, kRingSz, kMaxMsg>> {
 
   auto send_w_key_impl(const MemBlock &msg, const u32 &key, const double &timeout = 1000000)
       -> Result<std::string> {
-    return ::rdmaio::Err("not implemented!");
+    // Newer libstdc++: Err("...") deduces Result<char[N]>, not Result<std::string>.
+    return ::rdmaio::Err(std::string("not implemented!"));
   }
 };
 

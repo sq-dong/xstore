@@ -35,9 +35,12 @@ meta_callback(const Header& rpc_header, const MemBlock& args, SendTrait* replyc)
 
   std::string dispatcher = "";
   {
+#if USE_NN
     if (std::is_same<XCache::FirstML<KK>, TNN<KK>>()) {
       dispatcher = cache->first_layer.serialize_to_file("xfirst");
-    } else {
+    } else
+#endif
+    {
       dispatcher = cache->first_layer.serialize();
     }
   }

@@ -148,11 +148,13 @@ main(int argc, char** argv)
                              // times
           RDMA_ASSERT(false) << "cm connect to server timeout";
 
-        auto qp_res =
-          cm.cc_rc(FLAGS_client_name + " thread-qp" + std::to_string(thread_id),
-                   rc,
-                   nic_idx,
-                   QPConfig());
+        // Must stringify client_name: int + "str" is pointer arithmetic in C++.
+        auto qp_res = cm.cc_rc(
+          std::to_string(FLAGS_client_name) + " thread-qp" +
+            std::to_string(thread_id),
+          rc,
+          nic_idx,
+          QPConfig());
         RDMA_ASSERT(qp_res == IOCode::Ok) << std::get<0>(qp_res.desc);
 
         auto key = std::get<1>(qp_res.desc);
@@ -175,8 +177,7 @@ main(int argc, char** argv)
             .set_req()
             .set_rpc_id(META)
             .set_corid(0)
-            .add_one_reply(rpc.reply_station,
-                           { .mem_ptr = reply_buf, .sz = 1024 })
+            .add_one_reply(rpc.reply_station, MemBlock(reply_buf, 1024))
             .add_arg<u64>(73);
           ASSERT(rpc.reply_station.cor_ready(0) == false);
           auto ret = op.execute_w_key(&sender, lkey);
@@ -296,6 +297,8 @@ main(int argc, char** argv)
                 key = XKey(ycsb.next_key());
               }
 
+              // Timer::passed_msec() is microseconds; used for Fig.12-style latency.
+              ::r2::Timer req_t;
               if (!FLAGS_vlen) {
                 auto res = core_eval(key,
                                      rc,
@@ -312,6 +315,7 @@ main(int argc, char** argv)
                 auto res = core_eval_v(key, rc, my_buf, R2_ASYNC_WAIT);
                 // TODO: how to check the value's correctness?
               }
+              statics[thread_id].set_lat(req_t.passed_msec());
               statics[thread_id].increment();
             }
 

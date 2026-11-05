@@ -36,12 +36,14 @@ union __attribute__((packed)) Values
 
   static auto offset_inplace(const usize& idx) -> usize
   {
-    return offsetof(Values, inplace[idx]);
+    // GCC>=10 rejects offsetof(..., arr[idx]) when idx is not a constant.
+    // Equivalent: base of array + idx * element size.
+    return offsetof(Values, inplace) + idx * sizeof(V);
   }
 
   static auto offset_wrapped(const usize& idx) -> usize
   {
-    return offsetof(Values, wrapped[idx]);
+    return offsetof(Values, wrapped) + idx * sizeof(WrappedType<V>);
   }
 };
 

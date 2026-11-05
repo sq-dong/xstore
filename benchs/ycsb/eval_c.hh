@@ -49,7 +49,8 @@ auto eval_w_rpc(const XKey &key, RPC &rpc, UDTransport &sender, R2_ASYNC) -> Val
       .set_req()
       .set_rpc_id(GET)
       .set_corid(R2_COR_ID())
-      .add_one_reply(rpc.reply_station, {.mem_ptr = reply_buf, .sz = sizeof(ValType)})
+      // MemBlock has a ctor → not an aggregate; designated init fails on GCC11/C++17.
+      .add_one_reply(rpc.reply_station, MemBlock(reply_buf, sizeof(ValType)))
       .add_arg<XKey>(key);
   ASSERT(rpc.reply_station.cor_ready(R2_COR_ID()) == false);
   auto ret = op.execute_w_key(&sender, 0);
@@ -130,23 +131,30 @@ auto core_eval(const XKey &key, const Arc<RC> &rc, RPC &rpc,
 
 auto core_eval_v(const XKey &key, const Arc<RC> &rc, char *my_buf, R2_ASYNC)
     -> ValType {
-  // evaluate a get() req
+  // evaluate a get() req (indirect / variable-length value path)
   const usize read_sz = DBTreeV::Leaf::inplace_value_end_offset();
 
   // 1. predict
   auto m = cache->select_sec_model(key);
   auto range = cache->get_predict_range(key);
 
-  auto ns = std::max(std::get<0>(range) / 16, 0);
-  auto ne =
-      std::min(std::get<1>(range) / 16, static_cast<int>(tts[m].size() - 1));
+  auto ns = std::max<int>(std::get<0>(range) / kNPageKey, 0);
+  auto ne = std::min<int>(static_cast<int>(tts[m].size() - 1),
+                          std::get<1>(range) / kNPageKey);
 
-  BatchOp<16> reqs;
+  // Must strip TT incarnation bits (same as core_eval); raw operator[] is not an address.
+  const usize kMaxBatch = 10;
+  ASSERT(ne >= ns);
+  ASSERT(static_cast<usize>(ne - ns + 1) <= kMaxBatch)
+    << "vlen predict range too wide: ns=" << ns << " ne=" << ne;
+
+  BatchOp<kMaxBatch> reqs;
   for (auto p = ns; p <= ne; ++p) {
     reqs.emplace();
     reqs.get_cur_op()
         .set_read()
-        .set_rdma_rbuf((const u64 *)(tts.at(m)[p]), rc->remote_mr.value().key)
+        .set_rdma_rbuf((const u64 *)(tts.at(m).get_wo_incar(p)),
+                       rc->remote_mr.value().key)
         .set_payload(my_buf + read_sz * (p - ns), read_sz,
                      rc->local_mr.value().lkey);
   }
@@ -156,19 +164,16 @@ auto core_eval_v(const XKey &key, const Arc<RC> &rc, char *my_buf, R2_ASYNC)
 
   // then find the value
   for (auto p = ns; p <= ne; ++p) {
-    DBTreeV::Leaf *node = reinterpret_cast<DBTreeV::Leaf *> (my_buf + read_sz * (p - ns));
+    DBTreeV::Leaf *node =
+      reinterpret_cast<DBTreeV::Leaf *>(my_buf + read_sz * (p - ns));
     auto idx = node->search(key);
     if (idx) {
-      // fetch the value
-
-      auto val_addr = node->get_value_raw(idx.value()); // get the pointer
-      ASSERT(val_addr.get_sz() == FLAGS_len);
+      auto val_addr = node->get_value_raw(idx.value());
+      ASSERT(val_addr.get_sz() == static_cast<usize>(FLAGS_len));
 
       AsyncOp<1> op;
       op.set_read()
-        .set_rdma_rbuf(//(const u64 *)(tts.at(m)[p]),
-                       val_addr.get_ptr<u64>(),
-                       rc->remote_mr.value().key)
+        .set_rdma_rbuf(val_addr.get_ptr<u64>(), rc->remote_mr.value().key)
         .set_payload(my_buf, val_addr.get_sz(), rc->local_mr.value().lkey);
       ret = op.execute_async(rc, IBV_SEND_SIGNALED, R2_ASYNC_WAIT);
       ASSERT(ret == ::rdmaio::IOCode::Ok);
@@ -176,8 +181,7 @@ auto core_eval_v(const XKey &key, const Arc<RC> &rc, char *my_buf, R2_ASYNC)
       return *((ValType *)my_buf);
     }
   }
-  // failed to found
-  ASSERT(false);
+  ASSERT(false) << "vlen miss key=" << key;
   ValType res;
   return res;
 }

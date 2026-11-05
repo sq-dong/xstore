@@ -71,7 +71,11 @@ public:
              << "; lat: " << statics[0].data.lat << " us";
 
       if (log_file) {
-        outfile << format_value(res, 0) << "\n";
+        // Plain numbers (no thousands separators) for easy parsing.
+        // col1: aggregate thpt (reqs/s); col2: lat sample from thread0 (us)
+        outfile << std::fixed << std::setprecision(0) << res << " "
+                << std::setprecision(3) << statics[0].data.lat << "\n";
+        outfile.flush();
       }
     }
     if (log_file) {

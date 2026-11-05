@@ -35,16 +35,16 @@ using namespace xstore::util;
 DEFINE_int64(threads, 1, "num client thread used");
 DEFINE_int64(coros, 1, "num client coroutine used per threads");
 
-// gflags string is conflict w pytorch, so currently xstore does not support
-// runnign NN with gflag string DEFINE_string(addr, "localhost:8888", "server
-// address");
+// USE_NN=0 (paper Fig.15 LR path): gflags strings are fine. With USE_NN=1,
+// avoid DEFINE_string (conflicts with libtorch) and use the saddr file instead.
+DEFINE_string(addr, "", "server address host:port; empty → read ./saddr");
 
 DEFINE_bool(vlen, false, "whether to use variable length value");
 
 DEFINE_uint64(nkeys, 1000000, "Number of keys to fetch");
 
 DEFINE_bool(load_from_file, true, "whether to load DB from the file");
-// DEFINE_string(data_file, "lognormal_uni_100m.txt", "data file name");
+DEFINE_string(data_file, "log_data.txt", "key file for USE_LOG fill_log_keys");
 
 using XThread = ::r2::Thread<usize>;
 
@@ -94,7 +94,7 @@ fill_tpcc_keys()
 void
 fill_log_keys()
 {
-  FileLoader loader("log_data.txt");
+  FileLoader loader(FLAGS_data_file);
 
   for (usize i = 0; i < FLAGS_nkeys; ++i) {
     auto key = loader.next_key<u64>(FileLoader::default_converter<u64>);
@@ -115,11 +115,13 @@ main(int argc, char** argv)
 
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-  // parse the server addr
-  {
+  if (!FLAGS_addr.empty()) {
+    server_addr = FLAGS_addr;
+  } else {
     std::ifstream ifs("saddr");
     ifs >> server_addr;
   }
+  ASSERT(!server_addr.empty()) << "need --addr or ./saddr";
 
   std::vector<std::unique_ptr<XThread>> workers;
 
@@ -179,7 +181,10 @@ main(int argc, char** argv)
           } while (t.passed_sec() < 10);
         }
 
-        RPCCore<SendTrait, RecvTrait, SManager> rpc(12);
+        // Must be > FLAGS_coros: ReplyStation indexes by coroutine id.
+        // OSM misses fall back to RPC; coros=16 with rpc(12) asserts.
+        RPCCore<SendTrait, RecvTrait, SManager> rpc(
+          static_cast<int>(FLAGS_coros) + 2);
         auto send_buf = std::get<0>(alloc1.alloc_one(1024).value());
         ASSERT(send_buf != nullptr);
         auto lkey = handler1->get_reg_attr().value().key;
@@ -209,8 +214,10 @@ main(int argc, char** argv)
                              // times
           RDMA_ASSERT(false) << "cm connect to server timeout";
 
+        // Must stringify client_name: int + "str" is pointer arithmetic in C++.
         auto qp_res =
-          cm.cc_rc(FLAGS_client_name + " thread-qp" + std::to_string(thread_id),
+          cm.cc_rc(std::to_string(FLAGS_client_name) + " thread-qp" +
+                     std::to_string(thread_id),
                    rc,
                    nic_idx,
                    QPConfig());
@@ -236,8 +243,7 @@ main(int argc, char** argv)
             .set_req()
             .set_rpc_id(META)
             .set_corid(0)
-            .add_one_reply(rpc.reply_station,
-                           { .mem_ptr = reply_buf, .sz = 1024 })
+            .add_one_reply(rpc.reply_station, MemBlock(reply_buf, 1024))
             .add_arg<u64>(73);
           ASSERT(rpc.reply_station.cor_ready(0) == false);
           auto ret = op.execute_w_key(&sender, lkey);
@@ -256,10 +262,15 @@ main(int argc, char** argv)
                  << " model buf: " << meta.model_buf
                  << "; tt_buf: " << meta.tt_buf;
 
-          // try serialize the first layer
+          // try serialize the first layer (NN first-layer only when USE_NN=1)
           cache = std::make_unique<XCache>(
             std::string(reply_buf + sizeof(ReplyMeta), meta.dispatcher_sz),
-            std::is_same<XCache::FirstML<KK>, TNN<KK>>());
+#if USE_NN
+            std::is_same<XCache::FirstML<KK>, TNN<KK>>()
+#else
+            false
+#endif
+          );
 
           LOG(4) << "first layer check: " << cache->first_layer.up_bound
                  << "; num: " << cache->first_layer.dispatch_num
@@ -348,8 +359,9 @@ main(int argc, char** argv)
                         send_buf,
                         thread_id](R2_ASYNC) {
             char reply_buf[1024];
+            // Leaf header can exceed 128B; size for kMaxBatch pages like ycsb margin.
             char* my_buf = reinterpret_cast<char*>(
-              std::get<0>(alloc1.alloc_one(kMaxBatch * 128).value()));
+              std::get<0>(alloc1.alloc_one(8192).value()));
 
             r2::Timer t;
 

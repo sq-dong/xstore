@@ -1,7 +1,8 @@
 #pragma once
 
+// Paper Fig.15 uses many linear sub-models; NN is an optional trade-off in the text.
 #ifndef USE_NN
-#define USE_NN 1
+#define USE_NN 0
 #endif
 #define USE_MV 0
 
@@ -157,11 +158,12 @@ load_ar(const usize& nkeys) -> usize
 }
 #endif
 
+DEFINE_string(data_file, "log_data.txt", "key file for USE_LOG load_from_file");
+
 auto
 load_from_file(const usize& nkeys) -> usize
 {
-  //  FileLoader loader("lognormal_uni_100m.txt");
-  FileLoader loader("log_data.txt");
+  FileLoader loader(FLAGS_data_file);
 
   char* cur_val_ptr = reinterpret_cast<char*>(val_buf);
 

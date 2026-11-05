@@ -18,6 +18,7 @@ DEFINE_uint64(alloc_mem_m,
 DEFINE_uint64(nkeys, 1000000, "Number of keys to load");
 
 DEFINE_uint64(ncheck_model, 100, "Number of models to check");
+DEFINE_uint64(server_life_s, 600, "Seconds to keep serving after index is ready");
 #include "./db.hh"
 #include "./worker.hh"
 
@@ -70,19 +71,31 @@ main(int argc, char** argv)
   // start the listener thread so that client can communicate w it
   ctrl.start_daemon();
 
-  u64 total_sz = sizeof(DBTree::Leaf) * 15000000L;
-  ASSERT(mem->sz > total_sz) << "total sz needed: " << total_sz;
+  // Upstream hard-coded 15M leaves (~17GB) for paper-scale runs. Scale with
+  // nkeys so small smoke tests fit into available hugepages (e.g. 8GB).
+  // Over-provision 2x keys as leaf slots to absorb B+tree underfill/splits.
+  u64 nleaves = std::max<u64>(FLAGS_nkeys * 2, 1024);
+  u64 total_sz = sizeof(DBTree::Leaf) * nleaves;
+  ASSERT(mem->sz > total_sz) << "total sz needed: " << total_sz
+                             << "; leave pool leaves=" << nleaves
+                             << "; bump --alloc_mem_m or nr_hugepages";
   xalloc = new XAlloc<sizeof(DBTree::Leaf)>((char*)mem->start_ptr(), total_sz);
   db.init_pre_alloced_leaf(*xalloc);
 
   val_buf = (u64)mem->start_ptr() + total_sz;
   if (FLAGS_vlen) {
-    model_buf = val_buf + (1024L * 1024L * 1024L * 6L);
+    // Upstream used a fixed 6GiB value arena for paper-scale datasets.
+    // Scale with nkeys×len so smoke / 1e6-key runs fit available hugepages.
+    const u64 payload = FLAGS_nkeys * static_cast<u64>(std::max(FLAGS_len, 8));
+    const u64 val_arena = std::max<u64>(payload + (64ULL << 20), 128ULL << 20);
+    model_buf = val_buf + val_arena;
   } else {
     model_buf = val_buf;
   }
   buf_end = (u64)mem->start_ptr() + FLAGS_alloc_mem_m * 1024 * 1024;
-  ASSERT(model_buf < buf_end) << "too little model buf";
+  ASSERT(model_buf < buf_end) << "too little model buf"
+                               << "; need_m≈" << ((model_buf - (u64)mem->start_ptr()) / MB + 1)
+                               << " alloc_mem_m=" << FLAGS_alloc_mem_m;
 
   // first load DB
   {
@@ -122,10 +135,10 @@ main(int argc, char** argv)
     }
   }
 
-  // wait for some seconds if there is worker
+  // wait for clients; upstream used 50s which is too short after training.
+  // Override with --server_life_s if needed (default 600).
   if (FLAGS_threads > 0) {
-    for (uint i = 0; i < 50; ++i) {
-      // while (1) {
+    for (uint i = 0; i < FLAGS_server_life_s; ++i) {
       // server does nothing because it is RDMA
       // client will read the reg_mem using RDMA
       sleep(1);

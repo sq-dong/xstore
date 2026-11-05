@@ -34,7 +34,9 @@ __thread usize worker_id;
 DEFINE_int32(len, 8, "average length of the value");
 DEFINE_int32(client_name, 0, "Unique client name (in int)");
 
-const usize kMaxBatch = 200;
+// Match ycsb: keep RDMA leaf-fetch batches small. OSM high-error models
+// fall back to RPC rather than posting huge page ranges.
+const usize kMaxBatch = 10;
 
 using namespace xcomm;
 
@@ -53,8 +55,8 @@ eval_w_rpc(const KK& key, RPC& rpc, UDTransport& sender, R2_ASYNC) -> ValType
     .set_req()
     .set_rpc_id(GET)
     .set_corid(R2_COR_ID())
-    .add_one_reply(rpc.reply_station,
-                   { .mem_ptr = reply_buf, .sz = sizeof(ValType) })
+    // MemBlock has a ctor → not an aggregate; designated init fails on GCC11/C++17.
+    .add_one_reply(rpc.reply_station, MemBlock(reply_buf, sizeof(ValType)))
     .add_arg<KK>(key);
   ASSERT(rpc.reply_station.cor_ready(R2_COR_ID()) == false);
   auto ret = op.execute_w_key(&sender, 0);
@@ -105,15 +107,13 @@ core_eval(const KK& key,
     error_cdf.insert(std::get<1>(range) - std::get<0>(range));
   }
 #endif
-  BatchOp<16> reqs;
+  BatchOp<kMaxBatch> reqs;
 
-  if (unlikely(ne - ns + 1 > kMaxBatch)) {
-    // unefficient case
+  if (unlikely(ne - ns + 1 > static_cast<int>(kMaxBatch))) {
     s.increment_gap_1(1);
     return eval_w_rpc(key, rpc, sender, R2_ASYNC_WAIT);
   }
 
-  usize current = 0;
   for (auto p = ns; p <= ne; ++p) {
     reqs.emplace();
     reqs.get_cur_op()
@@ -122,20 +122,14 @@ core_eval(const KK& key,
                      rc->remote_mr.value().key)
       .set_payload(
         my_buf + read_sz * (p - ns), read_sz, rc->local_mr.value().lkey);
-    current += 1;
-
-    if (current == 16) {
-      // flush
-      auto ret = reqs.execute_async(rc, R2_ASYNC_WAIT);
-      ASSERT(ret == ::rdmaio::IOCode::Ok);
-      reqs.reset();
-      current = 0;
-    }
   }
 
-  if (current > 0) {
+  {
     auto ret = reqs.execute_async(rc, R2_ASYNC_WAIT);
-    ASSERT(ret == ::rdmaio::IOCode::Ok);
+    if (unlikely(ret != ::rdmaio::IOCode::Ok)) {
+      s.increment_gap_1(1);
+      return eval_w_rpc(key, rpc, sender, R2_ASYNC_WAIT);
+    }
   }
   /*
     {
@@ -168,11 +162,9 @@ core_eval(const KK& key,
       return *((ValType*)my_buf);
     }
   }
-  // failed to found
-  ASSERT(false) << "failed to find key: " << key << " w range: " << ns << "~"
-                << ne;
-  ValType res;
-  return res;
+  // Prediction miss (common on skewed OSM with few models): fall back to RPC.
+  s.increment_gap_1(1);
+  return eval_w_rpc(key, rpc, sender, R2_ASYNC_WAIT);
 }
 
 auto
